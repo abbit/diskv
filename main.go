@@ -1,74 +1,43 @@
 package main
 
 import (
-	"io"
+	"flag"
 	"log"
-	"net/http"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-
-	bolt "go.etcd.io/bbolt"
+	"github.com/abbit/diskv/config"
+	"github.com/abbit/diskv/db"
+	"github.com/abbit/diskv/server"
 )
 
 var (
-    defaultBucketName = []byte("default")
+	configfile = flag.String("config", "config.yml", "path to config file")
+	name       = flag.String("name", "", "name of this server")
 )
 
+func parseFlags() {
+	flag.Parse()
+
+	if *name == "" {
+		log.Fatalf("Must provide name")
+	}
+}
+
 func main() {
-    db, err := bolt.Open("diskv.db", 0666, nil)
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer db.Close()
-    db.Update(func(tx *bolt.Tx) error {
-        _, err := tx.CreateBucketIfNotExists(defaultBucketName)
-        if err != nil {
-            return err
-        }
-        return nil
-    })
+	parseFlags()
 
-    r := chi.NewRouter()
-    r.Use(middleware.Logger)
+	config, err := config.New(*configfile, *name)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    r.Get("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
-       w.Write([]byte("ok")) 
-    })
+	db, err := db.New(config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
 
-    r.Get("/store/{key}", func(w http.ResponseWriter, r *http.Request) {
-        key := chi.URLParam(r, "key")
-        db.View(func(tx *bolt.Tx) error {
-            b := tx.Bucket(defaultBucketName)
-            v := b.Get([]byte(key))
-            w.Write(v)
-            return nil
-        })
-    })
-
-    r.Post("/store/{key}", func(w http.ResponseWriter, r *http.Request) {
-        key := chi.URLParam(r, "key")
-        value, err := io.ReadAll(r.Body)
-        if err != nil {
-            log.Fatal(err)
-        }
-        defer r.Body.Close()
-
-        db.Update(func(tx *bolt.Tx) error {
-            b := tx.Bucket(defaultBucketName)
-            b.Put([]byte(key), value)
-            return nil
-        })
-    })
-
-    r.Delete("/store/{key}", func(w http.ResponseWriter, r *http.Request) {
-        key := chi.URLParam(r, "key")
-        db.Update(func(tx *bolt.Tx) error {
-            b := tx.Bucket(defaultBucketName)
-            b.Delete([]byte(key))
-            return nil
-        })
-    })
-
-    http.ListenAndServe(":3000", r)
+	server := server.New(db, config)
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatal(err)
+	}
 }
