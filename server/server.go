@@ -2,15 +2,15 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/rpc"
 
 	"github.com/abbit/diskv/config"
 	"github.com/abbit/diskv/db"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 )
 
 var (
@@ -21,6 +21,7 @@ type Server struct {
 	config *config.Config
 	db     *db.DB
 	http   *http.Server
+    rpc *rpc.Server
 }
 
 func New(db *db.DB, config *config.Config) *Server {
@@ -30,14 +31,13 @@ func New(db *db.DB, config *config.Config) *Server {
 		http: &http.Server{
 			Addr: config.ThisShard().Address,
 		},
+        rpc: rpc.NewServer(),
 	}
 
-	r := chi.NewRouter()
-    r.Use(middleware.Logger)
-	r.Get("/store/{key}", server.routingHandler)
-	r.Put("/store/{key}", server.routingHandler)
+    mux := http.NewServeMux()
+    mux.HandleFunc("/", server.routingHandler)
+	server.http.Handler = logMiddleware(mux)
 
-	server.http.Handler = r
 	return server
 }
 
@@ -47,8 +47,10 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) routingHandler(w http.ResponseWriter, r *http.Request) {
-	key := getKeyFromParams(r)
+    key := []byte(r.URL.Path[1:])
 	shardForKey := s.config.GetShardForKey(key)
+    r = keyToContext(r, key)
+    r = shardToContext(r, shardForKey)
 
 	if s.config.ThisShard().Index != shardForKey.Index {
         s.redirectHandler(w, r)
@@ -66,8 +68,8 @@ func (s *Server) routingHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) redirectHandler(w http.ResponseWriter, r *http.Request) {
-	key := getKeyFromParams(r)
-	shardForKey := s.config.GetShardForKey(key)
+    key := keyFromContext(r)
+    shard := shardFromContext(r)
 
     body, err := io.ReadAll(r.Body)
     if err != nil {
@@ -76,7 +78,7 @@ func (s *Server) redirectHandler(w http.ResponseWriter, r *http.Request) {
     }
     defer r.Body.Close()
 
-    req, err := http.NewRequest(r.Method, fmt.Sprintf("http://%s/store/%s", shardForKey.Address, key), bytes.NewReader(body))
+    req, err := http.NewRequest(r.Method, fmt.Sprintf("http://%s/store/%s", shard.Address, key), bytes.NewReader(body))
     if err != nil {
         http.Error(w, "error creating request", http.StatusInternalServerError)
         return
@@ -95,11 +97,11 @@ func (s *Server) redirectHandler(w http.ResponseWriter, r *http.Request) {
         http.Error(w, "error copying body", http.StatusInternalServerError)
         return
     }
-    w.WriteHeader(resp.StatusCode)
 }
 
 func (s *Server) getHandler(w http.ResponseWriter, r *http.Request) {
-	key := getKeyFromParams(r)
+    key := keyFromContext(r)
+
 	value, err := s.db.Get(key)
 	if err != nil {
 		http.Error(w, "error with get from db", http.StatusInternalServerError)
@@ -111,7 +113,8 @@ func (s *Server) getHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) putHandler(w http.ResponseWriter, r *http.Request) {
-	key := getKeyFromParams(r)
+    key := keyFromContext(r)
+
 	value, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Fatal(err)
@@ -128,6 +131,26 @@ func (s *Server) putHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func getKeyFromParams(r *http.Request) []byte {
-	return []byte(chi.URLParam(r, "key"))
+func keyToContext(r *http.Request, key []byte) *http.Request {
+    return r.WithContext(context.WithValue(r.Context(), "key", key))
 }
+
+func keyFromContext(r *http.Request) []byte {
+    return r.Context().Value("key").([]byte)
+}
+
+func shardToContext(r *http.Request, shard config.Shard) *http.Request {
+    return r.WithContext(context.WithValue(r.Context(), "shard", shard))
+}
+
+func shardFromContext(r *http.Request) config.Shard {
+    return r.Context().Value("shard").(config.Shard)
+}
+
+func logMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL.Path)
+        next.ServeHTTP(w, r)
+    })
+}
+
