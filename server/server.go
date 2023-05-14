@@ -1,9 +1,6 @@
 package server
 
 import (
-	"bytes"
-	"context"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -14,143 +11,135 @@ import (
 )
 
 var (
-    ShardHeaderName = "X-From-Shard"
+	ShardHeaderName = "X-From-Shard"
 )
 
 type Server struct {
 	config *config.Config
-	db     *db.DB
-	http   *http.Server
-    rpc *rpc.Server
+
+	shardService *ShardService
+
+	rpc  *rpc.Server
+	http *http.Server
+
+	shardClientMap map[int]*rpc.Client // TODO: protect with mutex?
 }
 
 func New(db *db.DB, config *config.Config) *Server {
 	server := &Server{
-		config: config,
-		db:     db,
+		config:       config,
+		shardService: &ShardService{db},
 		http: &http.Server{
-			Addr: config.ThisShard().Address,
+			Addr: config.ThisShard().HttpAddress(),
 		},
-        rpc: rpc.NewServer(),
+		rpc:            rpc.NewServer(),
+		shardClientMap: make(map[int]*rpc.Client),
 	}
 
-    mux := http.NewServeMux()
-    mux.HandleFunc("/", server.routingHandler)
+	server.rpc.Register(server.shardService)
+	mux := http.NewServeMux()
+	mux.HandleFunc(rpc.DefaultRPCPath, server.rpc.ServeHTTP)
+	mux.HandleFunc("/", server.routingHandler)
 	server.http.Handler = logMiddleware(mux)
 
 	return server
 }
 
 func (s *Server) ListenAndServe() error {
-	fmt.Printf("listening on %s\n", s.http.Addr)
+	log.Printf("HTTP server listening on %s\n", s.http.Addr)
 	return s.http.ListenAndServe()
 }
 
 func (s *Server) routingHandler(w http.ResponseWriter, r *http.Request) {
-    key := []byte(r.URL.Path[1:])
-	shardForKey := s.config.GetShardForKey(key)
-    r = keyToContext(r, key)
-    r = shardToContext(r, shardForKey)
-
-	if s.config.ThisShard().Index != shardForKey.Index {
-        s.redirectHandler(w, r)
-		return
+	switch r.Method {
+	case "GET":
+		s.getHandler(w, r)
+	case "PUT":
+		s.putHandler(w, r)
+	default:
+		http.Error(w, "Wrong method", http.StatusBadRequest)
 	}
-
-    switch r.Method {
-    case "GET":
-        s.getHandler(w, r)
-    case "PUT":
-        s.putHandler(w, r)
-    default:
-        http.Error(w, "Wrong method", http.StatusBadRequest)
-    }
-}
-
-func (s *Server) redirectHandler(w http.ResponseWriter, r *http.Request) {
-    key := keyFromContext(r)
-    shard := shardFromContext(r)
-
-    body, err := io.ReadAll(r.Body)
-    if err != nil {
-        http.Error(w, "error reading body", http.StatusInternalServerError)
-        return
-    }
-    defer r.Body.Close()
-
-    req, err := http.NewRequest(r.Method, fmt.Sprintf("http://%s/store/%s", shard.Address, key), bytes.NewReader(body))
-    if err != nil {
-        http.Error(w, "error creating request", http.StatusInternalServerError)
-        return
-    }
-
-    client := &http.Client{}
-    resp, err := client.Do(req)
-    if err != nil {
-        http.Error(w, "error sending request", http.StatusInternalServerError)
-        return
-    }
-    defer resp.Body.Close()
-
-    w.Header().Set(ShardHeaderName, resp.Header.Get(ShardHeaderName))
-    if _, err := io.Copy(w, resp.Body); err != nil {
-        http.Error(w, "error copying body", http.StatusInternalServerError)
-        return
-    }
 }
 
 func (s *Server) getHandler(w http.ResponseWriter, r *http.Request) {
-    key := keyFromContext(r)
+	key := []byte(r.URL.Path[1:])
+	shardForKey := s.config.GetShardForKey(key)
 
-	value, err := s.db.Get(key)
-	if err != nil {
-		http.Error(w, "error with get from db", http.StatusInternalServerError)
-		return
+	var value []byte
+	if s.config.ThisShard().Index == shardForKey.Index {
+		err := s.shardService.Get(key, &value)
+		if err != nil {
+			http.Error(w, "error with get from db", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// call rpc method on correct shard
+		client, err := s.getShardClient(shardForKey)
+		if err != nil {
+			http.Error(w, "error with dialing shard", http.StatusInternalServerError)
+			return
+		}
+		err = client.Call("ShardService.Get", key, &value)
+		if err != nil {
+			http.Error(w, "error with get from db", http.StatusInternalServerError)
+			return
+		}
 	}
 
-	w.Header().Set(ShardHeaderName, s.config.ThisShard().Name)
+	w.Header().Set(ShardHeaderName, shardForKey.Name)
 	w.Write(value)
 }
 
 func (s *Server) putHandler(w http.ResponseWriter, r *http.Request) {
-    key := keyFromContext(r)
-
+	key := []byte(r.URL.Path[1:])
+	shardForKey := s.config.GetShardForKey(key)
 	value, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer r.Body.Close()
 
-	err = s.db.Put(key, value)
-	if err != nil {
-		http.Error(w, "error with put to db", http.StatusInternalServerError)
-		return
+	args := &ShardServicePutArgs{key, value}
+	if s.config.ThisShard().Index == shardForKey.Index {
+		err := s.shardService.Put(args, nil)
+		if err != nil {
+			http.Error(w, "error with put to db", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		client, err := s.getShardClient(shardForKey)
+		if err != nil {
+			http.Error(w, "error with dialing shard", http.StatusInternalServerError)
+			return
+		}
+		// call rpc method on correct shard
+		err = client.Call("ShardService.Set", args, nil)
+		if err != nil {
+			http.Error(w, "error with get from db", http.StatusInternalServerError)
+			return
+		}
 	}
 
-	w.Header().Set(ShardHeaderName, s.config.ThisShard().Name)
+	w.Header().Set(ShardHeaderName, shardForKey.Name)
 	w.WriteHeader(http.StatusOK)
 }
 
-func keyToContext(r *http.Request, key []byte) *http.Request {
-    return r.WithContext(context.WithValue(r.Context(), "key", key))
-}
-
-func keyFromContext(r *http.Request) []byte {
-    return r.Context().Value("key").([]byte)
-}
-
-func shardToContext(r *http.Request, shard config.Shard) *http.Request {
-    return r.WithContext(context.WithValue(r.Context(), "shard", shard))
-}
-
-func shardFromContext(r *http.Request) config.Shard {
-    return r.Context().Value("shard").(config.Shard)
+func (s *Server) getShardClient(shard config.Shard) (*rpc.Client, error) {
+	client, ok := s.shardClientMap[shard.Index]
+	if !ok {
+		rpcClient, err := rpc.DialHTTPPath("tcp", shard.HttpAddress(), rpc.DefaultRPCPath)
+		if err != nil {
+			return nil, err
+		}
+		s.shardClientMap[shard.Index] = rpcClient
+		client = rpcClient
+	}
+	return client, nil
 }
 
 func logMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL.Path)
-        next.ServeHTTP(w, r)
-    })
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL.Path)
+		next.ServeHTTP(w, r)
+	})
 }
-

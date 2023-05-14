@@ -10,8 +10,9 @@ import (
 
 type configfile struct {
 	Shards []struct {
-		Name    string `yaml:"name"`
-		Address string `yaml:"addr"`
+		Name     string `yaml:"name"`
+		Host     string `yaml:"host"`
+		HttpPort int    `yaml:"http_port"`
 	} `yaml:"shards"`
 }
 
@@ -21,9 +22,10 @@ type Config struct {
 }
 
 type Shard struct {
-	Index   int
-	Name    string
-	Address string
+	Index    int
+	Name     string
+	host     string
+	httpPort int
 }
 
 func New(filepath string, name string) (*Config, error) {
@@ -35,9 +37,10 @@ func New(filepath string, name string) (*Config, error) {
 	shards := make(map[string]Shard)
 	for i, server := range config.Shards {
 		shards[server.Name] = Shard{
-			Index:   i,
-			Name:    server.Name,
-			Address: server.Address,
+			Index:    i,
+			Name:     server.Name,
+			host:     server.Host,
+			httpPort: server.HttpPort,
 		}
 	}
 
@@ -69,6 +72,10 @@ func (c *Config) getShardByIndex(index int) Shard {
 	}
 
 	return Shard{}
+}
+
+func (s Shard) HttpAddress() string {
+	return fmt.Sprintf("%s:%d", s.host, s.httpPort)
 }
 
 func parseFile(filepath string) (*configfile, error) {

@@ -1,5 +1,7 @@
 shards:
   - name: shard1
-    addr: localhost:3000
+    host: localhost
+    http_port: 3000
   - name: shard2
-    addr: localhost:3001
+    host: localhost
+    http_port: 3001
