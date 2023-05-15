@@ -5,7 +5,6 @@ import (
 	"log"
 
 	"github.com/abbit/diskv/config"
-	"github.com/abbit/diskv/db"
 	"github.com/abbit/diskv/server"
 )
 
@@ -30,8 +29,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	db := db.New()
-	server := server.New(db, config)
+	server := server.New(config)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}

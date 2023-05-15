@@ -23,11 +23,11 @@ type configfile struct {
 }
 
 type Config struct {
-	shards    [][]*Shard
-	thisShard *Shard
+	nodes    [][]*Node // [shard][replica]
+	thisNode *Node
 }
 
-type Shard struct {
+type Node struct {
 	Index    int
 	Replica  bool
 	Name     string
@@ -41,67 +41,69 @@ func New(filepath string, name string) (*Config, error) {
 		return nil, err
 	}
 
-	shards := make([][]*Shard, len(cfgfile.Shards))
-	var thisShard *Shard
+	nodes := make([][]*Node, len(cfgfile.Shards))
+	var thisNode *Node
 	for _, shard := range cfgfile.Shards {
-		shards[shard.Index] = make([]*Shard, len(shard.Replicas)+1)
-		s := &Shard{
+		nodes[shard.Index] = make([]*Node, len(shard.Replicas)+1)
+		s := &Node{
 			Index:    shard.Index,
 			Replica:  false,
 			Name:     shard.Name,
 			host:     shard.Host,
 			httpPort: shard.HttpPort,
 		}
-		shards[shard.Index][0] = s
+		nodes[shard.Index][0] = s
 		if shard.Name == name {
-			thisShard = s
+			thisNode = s
 		}
 		for i, replica := range shard.Replicas {
-			s := &Shard{
+			s := &Node{
 				Index:    shard.Index,
 				Replica:  true,
 				Name:     replica.Name,
 				host:     replica.Host,
 				httpPort: replica.HttpPort,
 			}
-			shards[shard.Index][i+1] = s
+			nodes[shard.Index][i+1] = s
 			if replica.Name == name {
-				thisShard = s
+				thisNode = s
 			}
 		}
 	}
 
-	if thisShard == nil {
+	if thisNode == nil {
 		return nil, fmt.Errorf("shard with name \"%s\" not found in config", name)
 	}
 
 	return &Config{
-		shards:    shards,
-		thisShard: thisShard,
+		nodes:    nodes,
+		thisNode: thisNode,
 	}, nil
 }
 
-func (c *Config) ThisShard() *Shard {
-	return c.thisShard
+func (c *Config) ThisNode() *Node {
+	return c.thisNode
 }
 
-func (c *Config) GetShardsForKey(key string) []*Shard {
+func (c *Config) GetNodesForKey(key string) []*Node {
 	keyhash := hash([]byte(key))
-	shardIndex := keyhash % len(c.shards)
-	return c.shards[shardIndex]
+	shardIndex := keyhash % len(c.nodes)
+	return c.nodes[shardIndex]
 }
 
-func (c *Config) GetMasterShardForKey(key string) *Shard {
-	shards := c.GetShardsForKey(key)
-	for _, shard := range shards {
-		if !shard.Replica {
-			return shard
-		}
-	}
-	return nil
+func (c *Config) GetMasterNodeForKey(key string) *Node {
+	return c.GetNodesForKey(key)[0]
 }
 
-func (s *Shard) HttpAddress() string {
+func (c *Config) GetShardNodes(shardIndex int) []*Node {
+	return c.nodes[shardIndex]
+}
+
+func (c *Config) GetShardMasterNode(shardIndex int) *Node {
+	return c.GetShardNodes(shardIndex)[0]
+}
+
+func (s *Node) HttpAddress() string {
 	return fmt.Sprintf("%s:%d", s.host, s.httpPort)
 }
 

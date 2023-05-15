@@ -5,9 +5,11 @@ import (
 	"log"
 	"net/http"
 	"net/rpc"
+	"sync"
+	"time"
 
 	"github.com/abbit/diskv/config"
-	"github.com/abbit/diskv/db"
+	"github.com/abbit/diskv/service"
 )
 
 var (
@@ -17,26 +19,27 @@ var (
 type Server struct {
 	config *config.Config
 
-	shardService *ShardService
+	service *service.Service
+
+	nodeClientMap map[string]*rpc.Client
+	mapMutex      sync.Mutex
 
 	rpc  *rpc.Server
 	http *http.Server
-
-	shardClientMap map[int]*rpc.Client // TODO: protect with mutex?
 }
 
-func New(db *db.DB, config *config.Config) *Server {
+func New(config *config.Config) *Server {
 	server := &Server{
-		config:       config,
-		shardService: NewShardService(db),
+		config:  config,
+		service: service.New(),
 		http: &http.Server{
-			Addr: config.ThisShard().HttpAddress(),
+			Addr: config.ThisNode().HttpAddress(),
 		},
-		rpc:            rpc.NewServer(),
-		shardClientMap: make(map[int]*rpc.Client),
+		rpc:           rpc.NewServer(),
+		nodeClientMap: make(map[string]*rpc.Client),
 	}
 
-	server.rpc.Register(server.shardService)
+	server.rpc.Register(server.service)
 	mux := http.NewServeMux()
 	mux.HandleFunc(rpc.DefaultRPCPath, server.rpc.ServeHTTP)
 	mux.HandleFunc("/", server.routingHandler)
@@ -46,15 +49,36 @@ func New(db *db.DB, config *config.Config) *Server {
 }
 
 func (s *Server) ListenAndServe() error {
+	if s.config.ThisNode().Replica {
+		log.Println("Starting replication loop")
+		go s.replicationLoop()
+	}
+
 	log.Printf("HTTP server listening on %s\n", s.http.Addr)
 	return s.http.ListenAndServe()
 }
 
-func (s *Server) Close() error {
-	for _, client := range s.shardClientMap {
-		client.Close()
+func (s *Server) replicationLoop() {
+	master := s.config.GetShardMasterNode(s.config.ThisNode().Index)
+	masterClient, err := s.getNodeClient(master)
+	if err != nil {
+        log.Fatalf("Can't connect to shard master: %v\n", err)
 	}
-	return s.http.Close()
+
+	for {
+		lastLogEntry := s.service.GetLastLogEntry()
+		var newLogEntry service.LogEntry
+		err := masterClient.Call("Service.GetNextLogEntry", lastLogEntry.Index, &newLogEntry)
+		if err == nil {
+			s.service.Put(&service.PutArgs{newLogEntry.Key, newLogEntry.Value}, nil)
+		} else if err.Error() == service.NoNewLogEntriesError.Error() {
+			// no new log entries
+		} else {
+			log.Println("Error:", err)
+		}
+
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 func (s *Server) routingHandler(w http.ResponseWriter, r *http.Request) {
@@ -70,77 +94,98 @@ func (s *Server) routingHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getHandler(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Path[1:]
-	shardForKey := s.config.GetShardForKey(key)
+	nodesForKey := s.config.GetNodesForKey(key)
 
 	var value []byte
-	if s.config.ThisShard().Index == shardForKey.Index {
-		err := s.shardService.Get(key, &value)
+	var respondedNode *config.Node
+	if s.config.ThisNode().Index == nodesForKey[0].Index {
+		err := s.service.Get(key, &value)
 		if err != nil {
+			log.Println("Error:", err)
 			http.Error(w, "error with get from db", http.StatusInternalServerError)
 			return
 		}
+		respondedNode = s.config.ThisNode()
 	} else {
-		// call rpc method on correct shard
-		client, err := s.getShardClient(shardForKey)
-		if err != nil {
-			http.Error(w, "error with dialing shard", http.StatusInternalServerError)
-			return
-		}
-		err = client.Call("ShardService.Get", key, &value)
-		if err != nil {
-			http.Error(w, "error with get from db", http.StatusInternalServerError)
-			return
+		for _, nodeForKey := range nodesForKey {
+			client, err := s.getNodeClient(nodeForKey)
+			if err != nil {
+                continue
+			}
+			err = client.Call("Service.Get", key, &value)
+			if err != nil {
+                continue
+			}
+            respondedNode = nodeForKey
+            break
 		}
 	}
 
-	w.Header().Set(ShardHeaderName, shardForKey.Name)
+    if respondedNode == nil {
+        http.Error(w, "error all shard's nodes", http.StatusInternalServerError)
+        return
+    }
+
+	w.Header().Set(ShardHeaderName, respondedNode.Name)
 	w.Write(value)
 }
 
 func (s *Server) putHandler(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Path[1:]
-	shardForKey := s.config.GetShardForKey(key)
+
+	if s.config.ThisNode().Replica {
+		http.Redirect(w, r, "http://"+s.config.GetMasterNodeForKey(key).HttpAddress()+"/"+key, http.StatusPermanentRedirect)
+		return
+	}
+
+	nodeForKey := s.config.GetMasterNodeForKey(key)
 	value, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer r.Body.Close()
 
-	args := &ShardServicePutArgs{key, value}
-	if s.config.ThisShard().Index == shardForKey.Index {
-		err := s.shardService.Put(args, nil)
+	args := &service.PutArgs{key, value}
+	if s.config.ThisNode().Index == nodeForKey.Index {
+		err := s.service.Put(args, nil)
 		if err != nil {
+			log.Println("Error:", err)
 			http.Error(w, "error with put to db", http.StatusInternalServerError)
 			return
 		}
 	} else {
-		client, err := s.getShardClient(shardForKey)
+		client, err := s.getNodeClient(nodeForKey)
 		if err != nil {
+			log.Println("Error:", err)
 			http.Error(w, "error with dialing shard", http.StatusInternalServerError)
 			return
 		}
-		// call rpc method on correct shard
-		err = client.Call("ShardService.Set", args, nil)
+		err = client.Call("Service.Put", args, nil)
 		if err != nil {
-			http.Error(w, "error with get from db", http.StatusInternalServerError)
+			log.Println("Error:", err)
+			http.Error(w, "error with put on different shard", http.StatusInternalServerError)
 			return
 		}
 	}
 
-	w.Header().Set(ShardHeaderName, shardForKey.Name)
+	w.Header().Set(ShardHeaderName, nodeForKey.Name)
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) getShardClient(shard *config.Shard) (*rpc.Client, error) {
-	client, ok := s.shardClientMap[shard.Index]
-	if !ok {
-		rpcClient, err := rpc.DialHTTPPath("tcp", shard.HttpAddress(), rpc.DefaultRPCPath)
-		if err != nil {
-			return nil, err
-		}
-		s.shardClientMap[shard.Index] = rpcClient
-		client = rpcClient
+func (s *Server) getNodeClient(node *config.Node) (*rpc.Client, error) {
+	s.mapMutex.Lock()
+	defer s.mapMutex.Unlock()
+
+	if client, ok := s.nodeClientMap[node.Name]; ok {
+		return client, nil
 	}
+
+	client, err := rpc.DialHTTP("tcp", node.HttpAddress())
+	if err != nil {
+		return nil, err
+	}
+
+	s.nodeClientMap[node.Name] = client
 	return client, nil
 }
 
