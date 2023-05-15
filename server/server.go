@@ -62,7 +62,7 @@ func (s *Server) routingHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getHandler(w http.ResponseWriter, r *http.Request) {
-	key := []byte(r.URL.Path[1:])
+	key := r.URL.Path[1:]
 	shardForKey := s.config.GetShardForKey(key)
 
 	var value []byte
@@ -91,7 +91,7 @@ func (s *Server) getHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) putHandler(w http.ResponseWriter, r *http.Request) {
-	key := []byte(r.URL.Path[1:])
+	key := r.URL.Path[1:]
 	shardForKey := s.config.GetShardForKey(key)
 	value, err := io.ReadAll(r.Body)
 	if err != nil {

@@ -58,8 +58,8 @@ func (c *Config) ThisShard() Shard {
 	return c.shards[c.name]
 }
 
-func (c *Config) GetShardForKey(key []byte) Shard {
-	keyhash := hash(key)
+func (c *Config) GetShardForKey(key string) Shard {
+	keyhash := hash([]byte(key))
 	shardIndex := keyhash % len(c.shards)
 	return c.getShardByIndex(shardIndex)
 }
