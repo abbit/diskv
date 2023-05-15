@@ -62,7 +62,7 @@ func (s *Server) replicationLoop() {
 	master := s.config.GetShardMasterNode(s.config.ThisNode().Index)
 	masterClient, err := s.getNodeClient(master)
 	if err != nil {
-        log.Fatalf("Can't connect to shard master: %v\n", err)
+		log.Fatalf("Can't connect to shard master: %v\n", err)
 	}
 
 	for {
@@ -70,7 +70,7 @@ func (s *Server) replicationLoop() {
 		var newLogEntry service.LogEntry
 		err := masterClient.Call("Service.GetNextLogEntry", lastLogEntry.Index, &newLogEntry)
 		if err == nil {
-			s.service.Put(&service.PutArgs{newLogEntry.Key, newLogEntry.Value}, nil)
+			s.service.Put(&service.PutArgs{Key: newLogEntry.Key, Value: newLogEntry.Value}, nil)
 		} else if err.Error() == service.NoNewLogEntriesError.Error() {
 			// no new log entries
 		} else {
@@ -110,21 +110,21 @@ func (s *Server) getHandler(w http.ResponseWriter, r *http.Request) {
 		for _, nodeForKey := range nodesForKey {
 			client, err := s.getNodeClient(nodeForKey)
 			if err != nil {
-                continue
+				continue
 			}
 			err = client.Call("Service.Get", key, &value)
 			if err != nil {
-                continue
+				continue
 			}
-            respondedNode = nodeForKey
-            break
+			respondedNode = nodeForKey
+			break
 		}
 	}
 
-    if respondedNode == nil {
-        http.Error(w, "error all shard's nodes", http.StatusInternalServerError)
-        return
-    }
+	if respondedNode == nil {
+		http.Error(w, "error all shard's nodes", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set(ShardHeaderName, respondedNode.Name)
 	w.Write(value)
@@ -145,7 +145,7 @@ func (s *Server) putHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	args := &service.PutArgs{key, value}
+	args := &service.PutArgs{Key: key, Value: value}
 	if s.config.ThisNode().Index == nodeForKey.Index {
 		err := s.service.Put(args, nil)
 		if err != nil {
