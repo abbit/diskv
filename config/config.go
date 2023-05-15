@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
+	"os"
 
 	"gopkg.in/yaml.v3"
 )
@@ -85,13 +85,13 @@ func (c *Config) ThisShard() *Shard {
 	return c.thisShard
 }
 
-func (c *Config) GetShardsForKey(key []byte) []*Shard {
-	keyhash := hash(key)
+func (c *Config) GetShardsForKey(key string) []*Shard {
+	keyhash := hash([]byte(key))
 	shardIndex := keyhash % len(c.shards)
 	return c.shards[shardIndex]
 }
 
-func (c *Config) GetMasterShardForKey(key []byte) *Shard {
+func (c *Config) GetMasterShardForKey(key string) *Shard {
 	shards := c.GetShardsForKey(key)
 	for _, shard := range shards {
 		if !shard.Replica {
@@ -106,7 +106,7 @@ func (s *Shard) HttpAddress() string {
 }
 
 func parseFile(filepath string) (*configfile, error) {
-	data, err := ioutil.ReadFile(filepath)
+	data, err := os.ReadFile(filepath)
 	if err != nil {
 		return nil, err
 	}

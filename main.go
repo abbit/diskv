@@ -30,12 +30,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	db, err := db.New(config)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
+	db := db.New()
 	server := server.New(db, config)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
