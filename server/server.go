@@ -28,7 +28,7 @@ type Server struct {
 func New(db *db.DB, config *config.Config) *Server {
 	server := &Server{
 		config:       config,
-		shardService: &ShardService{db},
+		shardService: NewShardService(db),
 		http: &http.Server{
 			Addr: config.ThisShard().HttpAddress(),
 		},
@@ -48,6 +48,13 @@ func New(db *db.DB, config *config.Config) *Server {
 func (s *Server) ListenAndServe() error {
 	log.Printf("HTTP server listening on %s\n", s.http.Addr)
 	return s.http.ListenAndServe()
+}
+
+func (s *Server) Close() error {
+	for _, client := range s.shardClientMap {
+		client.Close()
+	}
+	return s.http.Close()
 }
 
 func (s *Server) routingHandler(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +131,7 @@ func (s *Server) putHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) getShardClient(shard config.Shard) (*rpc.Client, error) {
+func (s *Server) getShardClient(shard *config.Shard) (*rpc.Client, error) {
 	client, ok := s.shardClientMap[shard.Index]
 	if !ok {
 		rpcClient, err := rpc.DialHTTPPath("tcp", shard.HttpAddress(), rpc.DefaultRPCPath)

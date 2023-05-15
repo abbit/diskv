@@ -1,7 +1,18 @@
 shards:
   - name: shard1
+    index: 0
     host: localhost
     http_port: 3000
+    replicas:
+    - name: shard1-replica1
+      host: localhost
+      http_port: 3010
+
   - name: shard2
+    index: 1
     host: localhost
     http_port: 3001
+    replicas:
+    - name: shard2-replica1
+      host: localhost
+      http_port: 3011

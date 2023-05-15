@@ -12,69 +12,96 @@ type configfile struct {
 	Shards []struct {
 		Name     string `yaml:"name"`
 		Host     string `yaml:"host"`
+		Index    int    `yaml:"index"`
 		HttpPort int    `yaml:"http_port"`
+		Replicas []struct {
+			Name     string `yaml:"name"`
+			Host     string `yaml:"host"`
+			HttpPort int    `yaml:"http_port"`
+		} `yaml:"replicas"`
 	} `yaml:"shards"`
 }
 
 type Config struct {
-	name   string
-	shards map[string]Shard
+	shards    [][]*Shard
+	thisShard *Shard
 }
 
 type Shard struct {
 	Index    int
+	Replica  bool
 	Name     string
 	host     string
 	httpPort int
 }
 
 func New(filepath string, name string) (*Config, error) {
-	config, err := parseFile(filepath)
+	cfgfile, err := parseFile(filepath)
 	if err != nil {
 		return nil, err
 	}
 
-	shards := make(map[string]Shard)
-	for i, server := range config.Shards {
-		shards[server.Name] = Shard{
-			Index:    i,
-			Name:     server.Name,
-			host:     server.Host,
-			httpPort: server.HttpPort,
+	shards := make([][]*Shard, len(cfgfile.Shards))
+	var thisShard *Shard
+	for _, shard := range cfgfile.Shards {
+		shards[shard.Index] = make([]*Shard, len(shard.Replicas)+1)
+		s := &Shard{
+			Index:    shard.Index,
+			Replica:  false,
+			Name:     shard.Name,
+			host:     shard.Host,
+			httpPort: shard.HttpPort,
+		}
+		shards[shard.Index][0] = s
+		if shard.Name == name {
+			thisShard = s
+		}
+		for i, replica := range shard.Replicas {
+			s := &Shard{
+				Index:    shard.Index,
+				Replica:  true,
+				Name:     replica.Name,
+				host:     replica.Host,
+				httpPort: replica.HttpPort,
+			}
+			shards[shard.Index][i+1] = s
+			if replica.Name == name {
+				thisShard = s
+			}
 		}
 	}
 
-	if _, ok := shards[name]; !ok {
+	if thisShard == nil {
 		return nil, fmt.Errorf("shard with name \"%s\" not found in config", name)
 	}
 
 	return &Config{
-		name:   name,
-		shards: shards,
+		shards:    shards,
+		thisShard: thisShard,
 	}, nil
 }
 
-func (c *Config) ThisShard() Shard {
-	return c.shards[c.name]
+func (c *Config) ThisShard() *Shard {
+	return c.thisShard
 }
 
-func (c *Config) GetShardForKey(key []byte) Shard {
+func (c *Config) GetShardsForKey(key []byte) []*Shard {
 	keyhash := hash(key)
 	shardIndex := keyhash % len(c.shards)
-	return c.getShardByIndex(shardIndex)
+	return c.shards[shardIndex]
 }
 
-func (c *Config) getShardByIndex(index int) Shard {
-	for _, shard := range c.shards {
-		if shard.Index == index {
+func (c *Config) GetMasterShardForKey(key []byte) *Shard {
+	shards := c.GetShardsForKey(key)
+	for _, shard := range shards {
+		if !shard.Replica {
 			return shard
 		}
 	}
-
-	return Shard{}
+	return nil
 }
 
-func (s Shard) HttpAddress() string {
+func (s *Shard) HttpAddress() string {
 	return fmt.Sprintf("%s:%d", s.host, s.httpPort)
 }
 
